@@ -35,7 +35,3 @@ Engineered features (lags, rolling stats, price/promo/weather) added very little
 - Lead time / service level in the reorder math are placeholders, not real supply-chain numbers
 - Store/product IDs are ordinal-encoded, so this won't generalize to unseen stores or products
 - Safety stock assumes normal-distributed error; a stricter version would use quantile forecasting instead
-
-## Running it
-
-Needs `numpy pandas matplotlib seaborn scikit-learn xgboost lightgbm joblib kagglehub` (the notebook installs the last three itself if missing). Looks for a local CSV first, falls back to `kagglehub`. Final model saves to `retail_demand_forecast_model.joblib`.
