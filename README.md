@@ -6,32 +6,36 @@ Forecasts daily `Units Sold` per store-product from the [Retail Store Inventory 
 
 ## Setup notes
 
-- The dataset ships a `Demand Forecast` column. Not using it as a feature or target it's someone else's model output, and training on it would just be learning to imitate that model instead of learning from actual sales.
-- Price, discount, promotion, holiday, and weather are treated as known ahead of time for a given day, since retailers set these in advance and weather forecasts exist. Only `Units Sold` itself gets lagged, so no row sees its own future.
+The dataset ships a `Demand Forecast` column, which is left out of both the features and the target it's someone else's model output, and training on it would just teach this model to imitate that one. Price, discount, promotion, holiday, and weather are treated as known ahead of time, since retailers set these in advance. Only `Units Sold` gets lagged, so no row sees its own future.
 
 ## Pipeline
 
-1. **Load & clean** - column names vary across dataset variants, so there's a resolver that maps whatever headers show up to the fields we need. Parses dates, sorts by store/product/date, drops duplicate rows, normalizes yes/no-style columns to 0/1.
-2. **Features** - calendar fields (day of week, month, quarter, week of year) plus lags (1/7/14/28 days) and rolling mean/std (7/14/28-day windows) of `Units Sold`, computed on `shift(1)` so nothing sees itself.
-3. **Leakage check** - same-day `Inventory Level` correlates with sales, but you can't actually know it before today's sales happen. Ran three variants of a Linear Regression pipeline (same-day inventory, inventory dropped, yesterday's inventory) to confirm the swap doesn't tank performance, then switched to `inventory_lag_1` regardless of the numbers, since same-day isn't obtainable at prediction time in a real deployment.
-4. **Model training** - chronological 70/15/15 train/val/test split (no shuffling, it's time series). Compared naive lag-1, 7-day moving average, Linear Regression, and tuned Random Forest / XGBoost / LightGBM (`RandomizedSearchCV` + `TimeSeriesSplit`).
-5. **Ablation study** - added feature groups one at a time (calendar → + lag → + rolling → + price/promo → + weather) and tracked validation MAE at each step, to see which groups are actually pulling weight.
-6. **Evaluate** - best model by validation MAE gets refit on train+val, scored once on test (that's the number that counts, everything before it is validation). Also ran rolling-origin backtesting across 4 origins to check the score isn't a fluke of one split, plus residual and feature-importance plots.
+Data is loaded through a column resolver (headers vary across dataset versions), then parsed, sorted by store/product/date, deduplicated, and normalized. Features combine calendar fields (day of week, month, quarter) with lags (1/7/14/28 days) and rolling mean/std (7/14/28-day windows) of `Units Sold`, all shifted by one day so nothing sees itself.
+
+A leakage check on `Inventory Level` came next it correlates with same-day sales, but you can't actually know today's inventory before today's sales happen. Three variants were tested (same-day, dropped, lagged), and the switch to `inventory_lag_1` was made regardless of the numbers, since same-day just isn't obtainable at prediction time.
+
+Training used a chronological 70/15/15 split and compared:
+- naive lag-1 and 7-day moving average baselines
+- Linear Regression
+- tuned Random Forest, XGBoost, and LightGBM (`RandomizedSearchCV` + `TimeSeriesSplit`)
+
+An ablation study added feature groups one at a time (calendar → lags → rolling → price/promo → weather) to see which actually moved validation MAE. The best model by validation score was refit on train+val and scored once on test that's the number that counts. Rolling-origin backtesting across four origins confirmed it wasn't a fluke of one split.
 
 ## Inventory decision layer
 
-7. **7-day forecast** - recursive rollout: predict day 1, feed that prediction back into the lag/rolling features to build day 2's inputs, predict day 2, and so on. Just repeating a single day's prediction 7x would miss day-of-week effects and get the error compounding wrong.
-8. **Safety stock** - assumes a fixed lead time and a 95% service level (z ≈ 1.65) applied to historical forecast error, as a stand-in for real demand uncertainty. Neither of these is in the dataset - they're placeholders for what would normally come from actual supplier agreements.
-9. **Reorder qty** - flags `stockout_risk` when current inventory falls short of forecasted lead-time demand plus the safety buffer, and computes `recommended_order_qty` to close it. Uses the most recent actual inventory reading, which is a different situation from step 3's leakage - that was about not knowing today's inventory before today's sales; this is the stock on the shelf right now, at decision time, which is observed, not predicted.
+The forecast feeds a small decision layer. A 7-day forecast uses a recursive rollout predict day 1, feed that back into the lag/rolling features, predict day 2, and so on rather than just repeating one day's prediction, which would miss day-of-week effects. Safety stock assumes a fixed lead time and 95% service level (z ≈ 1.65) applied to historical forecast error, standing in for real demand uncertainty since neither figure is in the dataset. From there, `stockout_risk` flags when current inventory falls short of forecasted lead-time demand plus the safety buffer, and `recommended_order_qty` closes that gap using the most recent *actual* inventory reading, which is fine since it's observed, not predicted.
 
 ## What actually helped
 
-- Engineered features (lags, rolling stats, price/promo/weather) added very little - EDA, the ablation study, and the backtest all pointed the same way. Probably a property of this particular synthetic dataset, not a general claim about retail demand.
-- Linear Regression was competitive with the tree models on validation, consistent with there not being much nonlinear structure for them to exploit.
+Engineered features (lags, rolling stats, price/promo/weather) added very little lift EDA, the ablation study, and the backtest all pointed the same way, likely a quirk of this particular synthetic dataset rather than a general fact about retail demand. Linear Regression stayed competitive with the tree models, consistent with not much nonlinear structure to exploit.
 
 ## Limitations
 
-- Single combined time-series split rather than per-series CV.
-- Lead time / service level in the reorder math are placeholders, not real supply-chain numbers.
-- Store/product IDs are ordinal-encoded, so this won't generalize to unseen stores or products.
-- Safety stock assumes normal-distributed forecast error; a more rigorous version would use quantile/probabilistic forecasting instead of a point forecast plus an assumed error distribution.
+- Single combined time-series split rather than per-series CV
+- Lead time / service level in the reorder math are placeholders, not real supply-chain numbers
+- Store/product IDs are ordinal-encoded, so this won't generalize to unseen stores or products
+- Safety stock assumes normal-distributed error; a stricter version would use quantile forecasting instead
+
+## Running it
+
+Needs `numpy pandas matplotlib seaborn scikit-learn xgboost lightgbm joblib kagglehub` (the notebook installs the last three itself if missing). Looks for a local CSV first, falls back to `kagglehub`. Final model saves to `retail_demand_forecast_model.joblib`.
